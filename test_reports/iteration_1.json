@@ -1,0 +1,38 @@
+{
+  "summary": "Full backend + frontend E2E testing of the Trade Me -> Dice automation console. Created pytest suite (/app/backend/tests/backend_test.py, 20 tests) covering /api/health, /api/start validation (empty, whitespace, missing field, 409 concurrency), /api/status (404 + full completed snapshot), /api/close, plus deep assertions on extracted listing fields, KM/engine formatting (not swapped, commas preserved), ratings, photo URL conversion/download/reachability and description length. All 20 passed. Playwright UI run on the live sample Trade Me listing completed end-to-end in ~12s: log console streamed, status pill reached 'Completed', all 14 vehicle fields populated, 4/4 ratings populated, 5/5 gallery photos rendered without broken images, 2118-char description shown, Dice step skipped gracefully with the expected log line. Mobile (390px) layout has no horizontal overflow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/status/{job_id}", "issue": "listing.year returns '2021' while listing.title is '2022 Jaguar F-PACE ...' — the 'Year <yyyy>' regex matches a registration/other year in body text before the title fallback runs. Data-accuracy nit; original logic was intentionally preserved, so confirm expected behaviour."},
+      {"endpoint": "/api/start", "issue": "In-memory _jobs dict grows unbounded (no eviction/TTL); long-lived process will retain every job snapshot and log list."},
+      {"endpoint": "/api/close/{job_id}", "issue": "close_event only unblocks the Dice review wait; there is no way to abort a job stuck in the Trade Me/photo phase, so the single-job lock stays held until Playwright timeouts elapse."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Stepper", "issues": ["When Dice credentials are absent the 'Dice Fill' step stays grey/idle with no 'Skipped' state, which reads like an incomplete run even though the job reports Completed."]},
+      {"screen": "Extracted Vehicle Data", "issues": ["'Price' and 'Doors' rows are always rendered but always show '—' for this listing (Listing.price is hardcoded None in trade_me.py); consider hiding empty rows or removing the redundant 'Price' vs 'Asking Price' pair."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Confirm/fix the 'year' extraction precedence (title-derived model year vs body-text year).",
+    "Optional: mark the Dice step as 'Skipped' in the stepper when dice_configured is false.",
+    "Optional: hide always-empty vehicle-data rows (Price, Doors) or add job eviction for the in-memory store."
+  ],
+  "critical_code_review_comments": [
+    "server.py: _active_job_id is cleared in _run's finally block, but a thread killed abruptly (process restart) would leave a stale active job; consider deriving 'active' purely from job.done.",
+    "runner.py: the exception handler emits status=error/done but never surfaces a traceback to logs (only str(e)), making live Trade Me DOM changes hard to diagnose.",
+    "photos.py: download_trade_me_photos wipes /app/temp_photos before downloading — if two jobs ever run concurrently (guard is app-level only) files from the other job are deleted; scope the temp dir per job_id."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "None. Live Trade Me sample listing 6051385299 used for extraction; downloaded photos land in /app/temp_photos.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md does not exist. Not required — app has no auth and Dice credentials are intentionally unset (dice_configured=false verified).",
+  "context_for_next_testing_agent": "Backend suite: `cd /app/backend && python -m pytest tests/backend_test.py -v`. Each full job takes ~12-15s against the live listing; only one job may run at a time (2nd concurrent start => 409), so keep job tests sequential (module-scoped completed_job fixture handles this). Dice login path is out of scope (no creds). Verified values for the sample listing: kilometer '39,000 km', engine_cc '2,996 cc', ask_price '$74,990', ratings 1.5/5/1.5/5, 5 photos on /photoserver/full/, description 2118 chars.",
+  "rca_of_the_issue": "No functional defects found. The only data discrepancy (year 2021 vs title 2022) stems from trade_me.py's find_regex(r'Year\\s+((?:19|20)\\d{2})') matching a body-text 'Year' label before the title-based fallback executes."
+}

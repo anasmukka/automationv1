@@ -1,0 +1,24 @@
+# Secrets & credentials — never commit
+.env
+backend/.env
+auth.json
+
+# Temporary photo workspace (cleared each job)
+temp_photos/
+
+# Playwright / debug artefacts
+dice_after_categories.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+frontend/build/
+
+# OS
+.DS_Store
