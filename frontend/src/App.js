@@ -14,7 +14,9 @@ import {
 } from "lucide-react";
 import "./App.css";
 
-const BACKEND = process.env.REACT_APP_BACKEND_URL;
+// Use the configured backend URL when present (preview/production).
+// Fall back to the local FastAPI server when running locally with no env var.
+const BACKEND = process.env.REACT_APP_BACKEND_URL || "http://localhost:8001";
 const API = `${BACKEND}/api`;
 
 const PHASES = [
