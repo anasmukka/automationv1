@@ -158,10 +158,10 @@ def extract_trade_me_listing(url: str) -> Listing:
             # falling back to the details modal only if it exists. This never
             # depends on clicking a "Show more details" element.
             #
-            # Output preserves the source number formatting (commas kept) but
-            # drops the unit:
-            #   "262,000km" -> "262,000"        "39,000 km" -> "39,000"
-            #   "4477cc"    -> "4477"           "4,477cc"   -> "4,477"
+            # The value is kept EXACTLY as shown on the source, INCLUDING the
+            # unit and the source spacing:
+            #   "262,000km" -> "262,000km"      "39,000 km" -> "39,000 km"
+            #   "4477cc"    -> "4477cc"         "4,477cc"   -> "4,477cc"
             # The km and cc patterns are unit-specific, so they can never swap.
             # -------------------------------------------------
             log("[TRADE ME] Reading vehicle badges...")
@@ -178,8 +178,8 @@ def extract_trade_me_listing(url: str) -> Listing:
 
             kilometer = find_first(
                 [
-                    r"odometer\s*[:\r\n]*\s*(\d{1,3}(?:,\d{3})+|\d{4,})\s*km",
-                    r"(?<![\d/])(\d{1,3}(?:,\d{3})+|\d{4,})\s*km\b",
+                    r"odometer\s*[:\r\n]*\s*((?:\d{1,3}(?:,\d{3})+|\d{4,})\s*km)",
+                    r"(?<![\d/])((?:\d{1,3}(?:,\d{3})+|\d{4,})\s*km)\b",
                 ],
                 body_text,
                 vehicle_details_text,
@@ -192,8 +192,8 @@ def extract_trade_me_listing(url: str) -> Listing:
 
             engine_cc = find_first(
                 [
-                    r"engine\s*(?:size)?\s*[:\r\n]*\s*(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc",
-                    r"(?<![\d/])(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc\b",
+                    r"engine\s*(?:size)?\s*[:\r\n]*\s*((?:\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc)",
+                    r"(?<![\d/])((?:\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc)\b",
                 ],
                 body_text,
                 vehicle_details_text,
@@ -283,11 +283,33 @@ def extract_trade_me_listing(url: str) -> Listing:
 
             # -------------------------------------------------
             # Number plate
-            # This only extracts an explicitly labelled plate.
-            # It will NOT mistake VIN/background-check data
-            # for the number plate.
+            # Resilient across layouts: reads the visible page first, then the
+            # details modal. Case-sensitive uppercase token (2-7 chars) right
+            # after the "Number plate" / "Plate" label so it will NOT mistake
+            # a following word (e.g. "history") for the plate.
             # -------------------------------------------------
-            number_plate = find_regex(r"Number plate\s+([A-Z0-9]+)")
+            number_plate = None
+
+            for src in (body_text, vehicle_details_text):
+                if not src:
+                    continue
+                m = re.search(
+                    r"(?i:number\s*plate)[\s:\r\n]+([A-Z0-9]{2,7})\b",
+                    src,
+                )
+                if not m:
+                    m = re.search(
+                        r"(?i:\bplate\b)[\s:\r\n]+([A-Z0-9]{2,7})\b",
+                        src,
+                    )
+                if m:
+                    number_plate = m.group(1).strip().upper()
+                    break
+
+            if number_plate:
+                log(f"[TRADE ME] Number plate: {number_plate}")
+            else:
+                log("[WARN] Could not find number plate")
 
             # -------------------------------------------------
             # Year

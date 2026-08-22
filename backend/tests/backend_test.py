@@ -100,15 +100,18 @@ class TestExtractionRules:
         # Station Wagon must be checked before the generic "Wagon"
         assert src.index('"Station Wagon"') < src.index('"Wagon"')
 
-    def test_km_engine_patterns_strip_unit_and_keep_commas(self, src):
-        """Replicate the find_first patterns against no-modal badge text."""
+    def test_km_engine_patterns_keep_unit_and_source_spacing(self, src):
+        """Replicate the find_first patterns against no-modal badge text.
+
+        Bug-fix #2: the value must now INCLUDE the unit and preserve source spacing.
+        """
         km_pats = [
-            r"odometer\s*[:\r\n]*\s*(\d{1,3}(?:,\d{3})+|\d{4,})\s*km",
-            r"(?<![\d/])(\d{1,3}(?:,\d{3})+|\d{4,})\s*km\b",
+            r"odometer\s*[:\r\n]*\s*((?:\d{1,3}(?:,\d{3})+|\d{4,})\s*km)",
+            r"(?<![\d/])((?:\d{1,3}(?:,\d{3})+|\d{4,})\s*km)\b",
         ]
         cc_pats = [
-            r"engine\s*(?:size)?\s*[:\r\n]*\s*(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc",
-            r"(?<![\d/])(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc\b",
+            r"engine\s*(?:size)?\s*[:\r\n]*\s*((?:\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc)",
+            r"(?<![\d/])((?:\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc)\b",
         ]
         for pats in (km_pats, cc_pats):
             for p in pats:
@@ -122,16 +125,94 @@ class TestExtractionRules:
             return None
 
         badges = "262,000km\nStation Wagon\nPetrol\n4477cc\nManual"
-        assert first(km_pats, badges) == "262,000"
-        assert first(cc_pats, badges) == "4477"
+        assert first(km_pats, badges) == "262,000km"
+        assert first(cc_pats, badges) == "4477cc"
 
         badges2 = "39,000 km\n4,477cc\n9.2 L / 100km\n149 grams/km"
-        assert first(km_pats, badges2) == "39,000"
-        assert first(cc_pats, badges2) == "4,477"
+        assert first(km_pats, badges2) == "39,000 km"
+        assert first(cc_pats, badges2) == "4,477cc"
+
+        assert first(cc_pats, "Engine size\n2,996 cc") == "2,996 cc"
 
         # units never swapped: km pattern must not pick a cc value and vice versa
         assert first(km_pats, "4477cc") is None
         assert first(cc_pats, "262,000km") is None
+
+    def test_number_plate_regex(self, src):
+        """Refinement: LABEL is case-insensitive ((?i:...)), CAPTURE stays uppercase."""
+        primary = r"(?i:number\s*plate)[\s:\r\n]+([A-Z0-9]{2,7})\b"
+        fallback = r"(?i:\bplate\b)[\s:\r\n]+([A-Z0-9]{2,7})\b"
+        assert primary in src, "primary number plate pattern drifted from source"
+        assert fallback in src, "plate fallback pattern drifted from source"
+
+        # primary alone must handle the real page label
+        assert re.search(primary, "Number plate\nPNF703\nYear\n2022").group(1) == "PNF703"
+        assert re.search(primary, "number plate: PNF703").group(1) == "PNF703"
+        # lowercase label matches, but a lowercase capture must NOT
+        assert re.search(primary, "number plate\nabc12") is None
+        # Title-case following word must not be captured
+        assert re.search(primary, "Number plate\nHistory") is None
+
+        def extract(text):
+            """Replicate the two-pattern source logic."""
+            m = re.search(primary, text) or re.search(fallback, text)
+            return m.group(1).strip().upper() if m else None
+
+        assert extract("Number plate\nPNF703\nYear\n2022") == "PNF703"
+        assert extract("number plate: PNF703") == "PNF703"
+        assert extract("Number plate\nhistory") is None
+        assert extract("Number plate history\nNo issues") is None
+
+        # capture must remain case-sensitive (no global re.IGNORECASE flag)
+        block = src[src.index("number_plate = None"):src.index("if number_plate:")]
+        assert "IGNORECASE" not in block, "plate capture must stay case-sensitive"
+        assert ".upper()" in block
+
+    def test_dice_ratings_selection_is_robust(self):
+        """Code-review checks on dice.py fill_dice_ratings (no creds -> cannot run live)."""
+        dice_src = Path("/app/backend/automation/dice.py").read_text(encoding="utf-8")
+        block = dice_src[dice_src.index("def fill_dice_ratings"):]
+        block = block[: block.index("\ndef ", 10)] if "\ndef " in block[10:] else block
+        assert "if value is None" in block and "[SKIP]" in block, "must skip None (leave '- None -')"
+        assert 'wait_for(state="attached"' in block, "must wait for select to attach"
+        assert '{"value": cand}, {"label": cand}' in block, "must try value then label"
+        assert 'f"{int(f)}.0"' in block, "must try numeric variant '5.0'"
+        assert 'dispatch_event("change")' in block, "must dispatch change event"
+        assert "Could not select" in block and "Available options" in block, \
+            "must log option dump on total failure"
+        # NEW refinement: index-based option-text fallback before the error dump
+        assert 'locator("option").all_inner_texts()' in block, "must read option inner texts"
+        assert "select_option(index=idx)" in block, "must select by option index"
+        assert "import re" in dice_src, "dice.py must import re for the text fallback"
+        assert block.index("all_inner_texts") < block.index("Could not select"), \
+            "option-text fallback must run BEFORE the error dump"
+
+        # replicate the fallback matcher semantics
+        def pick(value, options):
+            for idx, txt in enumerate(options):
+                t = (txt or "").strip()
+                if t == value or re.match(rf"^{re.escape(value)}(\D|$)", t):
+                    return idx
+            return None
+
+        assert pick("3.5", ["- None -", "3", "3.5", "4"]) == 2
+        assert pick("3.5", ["- None -", "3 stars", "3.5 stars"]) == 2
+        assert pick("3", ["- None -", "3 stars", "3.5 stars"]) == 1
+        assert pick("5", ["- None -", "1", "2"]) is None
+        # KNOWN LIMITATION (reported): (\D|$) treats "." as a boundary, so an
+        # integer value can match a half-star label if it appears first.
+        assert pick("3", ["- None -", "3.5 stars", "3 stars"]) == 1  # matches "3.5 stars"
+        # config mapping
+        cfg = Path("/app/backend/automation/config.py").read_text(encoding="utf-8")
+        for field, sel in [("energy_rating", "#exf_41"), ("overall_safety", "#exf_42"),
+                           ("carbon_rating", "#exf_43"), ("driver_safety", "#exf_44")]:
+            assert f'"{field}": "{sel}"' in cfg, f"{field} -> {sel} mapping missing"
+
+    def test_dice_form_fills_number_plate_as_is(self):
+        dice_src = Path("/app/backend/automation/dice.py").read_text(encoding="utf-8")
+        assert '"number_plate": listing.number_plate,' in dice_src
+        cfg = Path("/app/backend/automation/config.py").read_text(encoding="utf-8")
+        assert '"number_plate": "#exf_31"' in cfg
 
     def test_extraction_does_not_require_modal(self, src):
         """Visible body_text must be the first source passed to find_first."""
@@ -195,23 +276,37 @@ class TestJobFlow:
         assert completed_job["done"] is True
         assert completed_job["error"] is None
 
-    # ---- NEW: unit-less km / engine ----
-    def test_kilometer_is_unitless_comma_formatted(self, completed_job):
+    # ---- km / engine WITH units (bug-fix #2) ----
+    def test_kilometer_includes_unit(self, completed_job):
         km = completed_job["listing"]["kilometer"]
-        assert km == "39,000", f"expected '39,000', got {km!r}"
-        assert not re.search(r"[a-z]", km, re.IGNORECASE), f"unit not stripped: {km!r}"
+        assert km == "39,000 km", f"expected '39,000 km', got {km!r}"
 
-    def test_engine_is_unitless_comma_formatted(self, completed_job):
+    def test_engine_includes_unit(self, completed_job):
         cc = completed_job["listing"]["engine_cc"]
-        assert cc == "2,996", f"expected '2,996', got {cc!r}"
-        assert not re.search(r"[a-z]", cc, re.IGNORECASE), f"unit not stripped: {cc!r}"
+        assert cc == "2,996 cc", f"expected '2,996 cc', got {cc!r}"
 
     def test_km_and_engine_not_swapped(self, completed_job):
-        km = int(completed_job["listing"]["kilometer"].replace(",", ""))
-        cc = int(completed_job["listing"]["engine_cc"].replace(",", ""))
+        km_raw = completed_job["listing"]["kilometer"]
+        cc_raw = completed_job["listing"]["engine_cc"]
+        assert km_raw.lower().endswith("km") and cc_raw.lower().endswith("cc")
+        km = int(re.sub(r"[^\d]", "", km_raw))
+        cc = int(re.sub(r"[^\d]", "", cc_raw))
         assert km > cc, f"km/engine look swapped: km={km} cc={cc}"
         assert km >= 1000
         assert 100 <= cc <= 10000
+
+    # ---- number plate (bug-fix #1) ----
+    def test_number_plate_extracted(self, completed_job):
+        plate = completed_job["listing"]["number_plate"]
+        assert plate, "number_plate is empty"
+        assert plate == "PNF703", f"expected 'PNF703', got {plate!r}"
+        assert plate == plate.upper()
+        assert plate != "."
+
+    def test_number_plate_log(self, completed_job):
+        logs = "\n".join(completed_job["logs"])
+        assert "[TRADE ME] Number plate: PNF703" in logs, logs[-1200:]
+        assert "[WARN] Could not find number plate" not in logs
 
     def test_ask_price_has_dollar(self, completed_job):
         assert completed_job["listing"]["ask_price"].startswith("$")
@@ -231,8 +326,8 @@ class TestJobFlow:
         logs = "\n".join(completed_job["logs"])
         for expected in [
             "[TRADE ME] Reading vehicle badges...",
-            "[TRADE ME] KM: 39,000",
-            "[TRADE ME] Engine: 2,996",
+            "[TRADE ME] KM: 39,000 km",
+            "[TRADE ME] Engine: 2,996 cc",
             "[TRADE ME] Fuel: Petrol",
             "[TRADE ME] Reading ratings...",
         ]:

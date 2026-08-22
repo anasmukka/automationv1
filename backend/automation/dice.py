@@ -10,6 +10,8 @@ This module NEVER clicks the final Post/Submit button.
 
 from playwright.sync_api import Page
 
+import re
+
 from .config import (
     DICE_URL,
     DICE_USERNAME,
@@ -170,18 +172,78 @@ def fill_dice_ratings(page: Page, listing: Listing):
             log(f"[SKIP] {field_name}: no source rating")
             continue
 
+        locator = page.locator(selector).first
+
+        # Make sure the dropdown has actually rendered before selecting.
         try:
-            locator = page.locator(selector)
+            locator.wait_for(state="attached", timeout=5000)
+        except Exception:
+            log(f"[WARNING] Rating selector not found: {selector}")
+            continue
 
-            if locator.count() == 0:
-                log(f"[WARNING] Rating selector not found: {selector}")
-                continue
+        value = str(value).strip()
 
-            locator.first.select_option(str(value))
-            log(f"[FILL] {field_name}: {value} stars")
+        # Build a set of equivalent strings Dice might use for this rating,
+        # e.g. "5" could be listed as "5", "5.0"; "3.5" stays "3.5".
+        candidates = [value]
+        try:
+            f = float(value)
+            if f.is_integer():
+                candidates.append(str(int(f)))   # "5"
+                candidates.append(f"{int(f)}.0")  # "5.0"
+            candidates.append(str(f))             # "3.5" / "5.0"
+        except ValueError:
+            pass
 
-        except Exception as e:
-            log(f"[ERROR] Could not fill {field_name}: {e}")
+        selected = False
+        for cand in dict.fromkeys(candidates):  # de-dupe, keep order
+            # Try matching by option value, then by visible label.
+            for kwargs in ({"value": cand}, {"label": cand}):
+                try:
+                    locator.select_option(**kwargs)
+                    selected = True
+                    break
+                except Exception:
+                    continue
+            if selected:
+                break
+
+        if selected:
+            # Nudge any custom widget bound to the native <select> to refresh.
+            try:
+                locator.dispatch_event("change")
+            except Exception:
+                pass
+            log(f"[FILL] {field_name}: {value} stars ({selector})")
+        else:
+            # Final fallback: pick the option whose visible text starts with the
+            # numeric value (handles labels like "3.5" or "3.5 stars").
+            try:
+                option_texts = locator.locator("option").all_inner_texts()
+            except Exception:
+                option_texts = []
+
+            for idx, txt in enumerate(option_texts):
+                t = (txt or "").strip()
+                if t == value or re.match(rf"^{re.escape(value)}(\D|$)", t):
+                    try:
+                        locator.select_option(index=idx)
+                        selected = True
+                        break
+                    except Exception:
+                        continue
+
+            if selected:
+                try:
+                    locator.dispatch_event("change")
+                except Exception:
+                    pass
+                log(f"[FILL] {field_name}: {value} stars ({selector})")
+            else:
+                log(
+                    f"[ERROR] Could not select {field_name}={value} on {selector}. "
+                    f"Available options: {option_texts}"
+                )
 
 
 # ---------------------------------------------------------

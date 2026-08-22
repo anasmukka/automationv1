@@ -1,0 +1,41 @@
+{
+  "summary": "Re-test of the 3 reported bugs. Backend: updated /app/backend/tests/backend_test.py (now 33 pytest tests, ALL PASS) — replaced the old unit-stripped km/cc assertions with unit-INCLUSIVE ones, added a number-plate regex test, a live number_plate assertion + log assertion, and two browser-free code-review tests for dice.py (fill_dice_ratings robustness + fill_dice_form number_plate -> #exf_31). Live job on listing 6051385299 completed in ~14s: kilometer='39,000 km' (unit + source spacing preserved), engine_cc='2,996 cc', not swapped, number_plate='PNF703' with log '[TRADE ME] Number plate: PNF703' and no plate WARN, ask_price='$74,990', ratings 1.5/5/1.5/5, 5 photos on /photoserver/full/ (first reachable, >1KB), description 2118 chars, Dice skipped gracefully ('DICE_USERNAME / DICE_PASSWORD not set'), no crash. Error handling verified: empty/whitespace url -> 400, missing field -> 422, unknown status/close -> 404, 2nd concurrent start -> 409, logs stream incrementally. Static regex validation: km pattern returns '262,000km'/'39,000 km', cc returns '4477cc'/'4,477cc'/'2,996 cc', km pattern returns None on '4477cc' and cc pattern None on '262,000km' (no swap). Dice rating code review confirmed: None -> [SKIP] (leaves '- None -'), wait_for(state='attached'), select_option by value then label, numeric variants ('5' -> '5'/'5.0'), dispatch_event('change'), and '[ERROR] Could not select <field>=<value> ... Available options: [...]' dump on failure; #exf_41..#exf_44 mapping present. Live Dice selection NOT exercised (no creds) — logic/structure verified only. Frontend E2E (Playwright, 1920x1080): url-input + start-btn work, status-pill reached 'Completed' in 16s, field-kilometer='39,000 km', field-engine_cc='2,996 cc', field-number_plate='PNF703', all 4 rating-* testids populated (1.5/5/1.5/5), photo-grid rendered 5 images, 0 error elements, no console errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "automation/trade_me.py (number plate)", "issue": "The PRIMARY plate pattern r\"number\\s*plate[\\s:\\r\\n]+([A-Z0-9]{2,7})\\b\" is compiled WITHOUT re.IGNORECASE, so it can never match the real page label 'Number plate' (capital N). Extraction only succeeds via the second fallback r\"\\bplate[\\s:\\r\\n]+...\". Works today but the primary branch is dead code — make the LABEL case-insensitive while keeping the CAPTURE GROUP case-sensitive, e.g. r\"[Nn]umber\\s*[Pp]late[\\s:\\r\\n]+([A-Z0-9]{2,7})\\b\"."},
+      {"endpoint": "automation/trade_me.py (number plate fallback)", "issue": "The generic \\bplate fallback will capture the next UPPERCASE token after any occurrence of 'plate' (e.g. 'Number plate history\\nNZ NEW' -> 'NZ'). Scope the search to the vehicle-details block or require the label to be a full line."},
+      {"endpoint": "automation/dice.py fill_dice_ratings", "issue": "Candidate set is numeric-only ('5', '5.0', '3.5'). If Dice renders option labels as '5 stars' / '\u2605\u2605\u2605\u2605\u2605' / 'Five', nothing is selected (only the option dump is logged). Recommend a final pass that picks the option whose inner text contains the numeric value (regex/contains match) before giving up."},
+      {"endpoint": "/api/status/{job_id}", "issue": "PRE-EXISTING (it_1/it_2): listing.year='2021' while title='2022 Jaguar F-PACE ...' — body-text Year match wins over the title fallback."},
+      {"endpoint": "/api/start | /api/close", "issue": "PRE-EXISTING: in-memory _jobs dict has no TTL/eviction; close() only signals the Dice review wait, so a job stuck in the Trade Me/photo phase holds the single-active lock until Playwright timeouts elapse."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Extracted Vehicle Data", "issues": ["'Price' and 'Doors' rows always render '\u2014' for this listing (Listing.price hard-coded None; doors not present on the page) — the 'Price' vs 'Asking Price' pair remains redundant.", "The last grid row ('Carbon Emissions') leaves an empty right-hand cell with a visible border, looking like a missing field. Consider spanning the last item or filling with a placeholder."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Optional (robustness, not blocking): make the primary number-plate LABEL case-insensitive so it isn't dead code, and scope the \\bplate fallback to the vehicle-details block.",
+    "Optional (robustness): in fill_dice_ratings add a contains/regex option-text fallback (e.g. option text matching the number) before logging the failure dump — current candidates only cover pure numeric labels.",
+    "Optional (pre-existing): fix year precedence (title model year vs body-text year, 2022 vs 2021).",
+    "Optional (UI): fill/span the trailing empty cell in the Extracted Vehicle Data grid."
+  ],
+  "critical_code_review_comments": [
+    "trade_me.py: primary number-plate regex is case-sensitive on the label and therefore never matches 'Number plate'; the feature silently depends on the looser \\bplate fallback.",
+    "dice.py fill_dice_ratings: robust for numeric option values/labels but has no substring/regex option matching, so non-numeric Dice labels would still fail (logged, not silent — acceptable).",
+    "trade_me.py: km fallback (?<![\\d/])((?:...|\\d{4,})\\s*km)\\b still scans the WHOLE body_text and can match an odometer-like number inside the free-text description; same whole-page keyword scan risk applies to fuel/transmission/body_type.",
+    "server.py: child stderr is merged into logs unprefixed, so tracebacks are indistinguishable from normal log lines."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "None. Live Trade Me listing 6051385299; photos downloaded to /app/temp_photos.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md does not exist. Not required — app has no auth; Dice creds intentionally unset (dice_configured=false via /api/health and 'Dice creds not set' chip).",
+  "context_for_next_testing_agent": "Run `cd /app/backend && python -m pytest tests/backend_test.py -v -p no:randomly` (~30s, 33 tests). Only one job at a time (2nd start -> 409); keep job tests sequential (module-scoped completed_job fixture retries once after 60s). TestExtractionRules is browser-free: km/cc patterns now expect the UNIT INCLUDED ('262,000km', '39,000 km', '4,477cc', '2,996 cc'); number-plate test replicates the two-pattern case-sensitive logic; two tests assert dice.py fill_dice_ratings structure (skip-None, wait_for attached, value/label, '5.0' variant, change event, option dump) and #exf_31/#exf_41-44 config mapping — update them if dice.py changes. Verified values for 6051385299: kilometer='39,000 km', engine_cc='2,996 cc', number_plate='PNF703', ask_price='$74,990', ratings 1.5/5/1.5/5, 5 photos, description 2118 chars, year='2021' (known nit). Live Dice login/rating selection remains untestable without creds.",
+  "rca_of_the_issue": "All 3 reported bugs are fixed and verified. (1) Number plate: extraction now succeeds and reaches the UI/#exf_31 as 'PNF703' (via the case-insensitive-by-accident \\bplate fallback — see minor issue). (2) Units restored: find_first capture groups now include the trailing unit inside group(1) while preserving source spacing, and the two patterns are unit-specific so km/cc can never swap. (3) fill_dice_ratings now waits for the select, tries value then label plus numeric variants, dispatches change, and dumps available options on failure instead of silently passing; it also skips None so untouched dropdowns stay '- None -'. Only remaining risk is non-numeric Dice option labels, which would be logged as [ERROR] rather than silently ignored."
+}
