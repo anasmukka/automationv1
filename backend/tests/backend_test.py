@@ -89,21 +89,44 @@ def completed_job(api):
 
 
 class TestJobFlow:
-    def test_conflict_while_running(self, api):
-        """Start a job then immediately try a second one -> 409."""
+    def test_conflict_and_incremental_log_streaming(self, api):
+        """Start a job, verify 409 on a second start, and that logs stream incrementally."""
         r = api.post(f"{BASE_URL}/api/start", json={"url": SAMPLE_URL}, timeout=60)
         assert r.status_code == 200, r.text
         job_id = r.json()["job_id"]
         r2 = api.post(f"{BASE_URL}/api/start", json={"url": SAMPLE_URL}, timeout=60)
         assert r2.status_code == 409, f"expected 409, got {r2.status_code} {r2.text}"
-        # drain the job so subsequent tests can start a new one
+
+        counts = []
+        statuses = []
         deadline = time.time() + POLL_TIMEOUT
+        snap = None
         while time.time() < deadline:
             snap = api.get(f"{BASE_URL}/api/status/{job_id}", timeout=30).json()
+            counts.append(len(snap["logs"]))
+            statuses.append(snap["status"])
             if snap.get("done"):
                 break
-            time.sleep(2)
-        assert snap.get("done"), "first job never completed"
+            time.sleep(1)
+        assert snap and snap.get("done"), "first job never completed"
+
+        # streaming: log count must have grown across at least two distinct polls
+        distinct = sorted(set(counts))
+        assert len(distinct) >= 3, f"logs did not stream incrementally: {counts}"
+        assert counts == sorted(counts), f"log count decreased: {counts}"
+        assert "running" in statuses and statuses[-1] == "completed", statuses
+
+    def test_exact_values_for_sample_listing(self, completed_job):
+        listing = completed_job["listing"]
+        assert listing["kilometer"] == "39,000 km", listing["kilometer"]
+        assert listing["engine_cc"] == "2,996 cc", listing["engine_cc"]
+        assert listing["ask_price"] == "$74,990", listing["ask_price"]
+        ratings = completed_job["ratings"]
+        assert [ratings["energy_rating"], ratings["overall_safety"],
+                ratings["carbon_rating"], ratings["driver_safety"]] == \
+            ["1.5", "5", "1.5", "5"], ratings
+        assert len(completed_job["photos"]["urls"]) == 5
+        assert len(completed_job["description"]) > 2000, len(completed_job["description"])
 
     def test_status_completed(self, completed_job):
         assert completed_job["status"] == "completed", completed_job.get("error") or completed_job.get("message")

@@ -6,21 +6,28 @@ Endpoints (all under /api):
   GET  /api/status/{job_id}   -> full progress snapshot (polled by the UI)
   POST /api/close/{job_id}    -> finish manual review / close the Dice browser
 
-The automation uses Playwright's sync API, so each job runs in a background
-thread. The final Post/Submit button is NEVER clicked.
+Each job runs in a CHILD PROCESS (see automation/job_worker.py) so Playwright's
+sync API executes on that process's main thread — required for Windows and safe
+everywhere. This server only reads the child's stdout to stream progress.
+The final Post/Submit button is NEVER clicked.
 """
 
+import json
+import subprocess
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from automation import config
-from automation.runner import run_job
-from automation.utils import add_log_listener, remove_log_listener
+from automation.job_worker import CLOSE_TOKEN, EVENT_PREFIX
+
+BACKEND_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="Trade Me -> Dice Automation")
 
@@ -52,7 +59,7 @@ class Job:
         self.photos: dict = {"urls": [], "files": []}
         self.done = False
         self.created_at = datetime.now(timezone.utc).isoformat()
-        self.close_event = threading.Event()
+        self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
 
     def snapshot(self) -> dict:
@@ -80,49 +87,75 @@ _active_lock = threading.Lock()
 _active_job_id: str | None = None
 
 
-def _make_emitter(job: Job):
-    def emit(event: dict):
-        etype = event.get("type")
-        with job.lock:
-            if etype == "log":
-                job.logs.append(event["message"])
-            elif etype == "phase":
-                job.phase = event.get("phase", job.phase)
-                job.phase_label = event.get("label", job.phase_label)
-                job.logs.append(f">>> {job.phase_label}")
-            elif etype == "data":
-                job.listing = event.get("listing")
-                job.description = event.get("description", "")
-            elif etype == "ratings":
-                job.ratings = event.get("ratings")
-            elif etype == "photos":
-                job.photos = {
-                    "urls": event.get("urls", []),
-                    "files": event.get("files", []),
-                }
-            elif etype == "status":
-                job.status = event.get("status", job.status)
-                job.message = event.get("message", "")
-            elif etype == "done":
-                job.done = True
-    return emit
+def _apply_event(job: Job, event: dict) -> None:
+    etype = event.get("type")
+    with job.lock:
+        if etype == "phase":
+            job.phase = event.get("phase", job.phase)
+            job.phase_label = event.get("label", job.phase_label)
+            job.logs.append(f">>> {job.phase_label}")
+        elif etype == "data":
+            job.listing = event.get("listing")
+            job.description = event.get("description", "")
+        elif etype == "ratings":
+            job.ratings = event.get("ratings")
+        elif etype == "photos":
+            job.photos = {
+                "urls": event.get("urls", []),
+                "files": event.get("files", []),
+            }
+        elif etype == "status":
+            job.status = event.get("status", job.status)
+            job.message = event.get("message", "")
+        elif etype == "done":
+            job.done = True
 
 
-def _run(job: Job):
-    emit = _make_emitter(job)
-
-    def log_listener(message: str):
-        emit({"type": "log", "message": message})
-
-    add_log_listener(log_listener)
+def _reader(job: Job, proc: subprocess.Popen) -> None:
+    global _active_job_id
     try:
-        run_job(job.url, emit, job.close_event)
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line.startswith(EVENT_PREFIX):
+                try:
+                    event = json.loads(line[len(EVENT_PREFIX):])
+                except json.JSONDecodeError:
+                    with job.lock:
+                        job.logs.append(line)
+                    continue
+                _apply_event(job, event)
+            else:
+                with job.lock:
+                    job.logs.append(line)
     finally:
-        remove_log_listener(log_listener)
-        global _active_job_id
+        proc.wait()
+        with job.lock:
+            if not job.done:
+                job.done = True
+                if job.status == "running":
+                    job.status = "error"
+                    if not job.message:
+                        job.message = (
+                            f"Automation process exited unexpectedly "
+                            f"(code {proc.returncode})."
+                        )
         with _active_lock:
             if _active_job_id == job.id:
                 _active_job_id = None
+
+
+def _start_worker(job: Job) -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "automation.job_worker", job.url],
+        cwd=str(BACKEND_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    job.proc = proc
+    threading.Thread(target=_reader, args=(job, proc), daemon=True).start()
 
 
 # ---------------------------------------------------------
@@ -162,9 +195,7 @@ def start(req: StartRequest):
         _jobs[job_id] = job
         _active_job_id = job_id
 
-    thread = threading.Thread(target=_run, args=(job,), daemon=True)
-    thread.start()
-
+    _start_worker(job)
     return {"job_id": job_id}
 
 
@@ -181,5 +212,11 @@ def close(job_id: str):
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    job.close_event.set()
+    proc = job.proc
+    if proc and proc.poll() is None:
+        try:
+            proc.stdin.write(CLOSE_TOKEN + "\n")
+            proc.stdin.flush()
+        except Exception:
+            pass
     return {"ok": True}
