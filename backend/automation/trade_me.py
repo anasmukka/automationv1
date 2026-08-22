@@ -49,6 +49,8 @@ def extract_trade_me_listing(url: str) -> Listing:
                     log("[TRADE ME] Opening full vehicle information...")
                     show_details.first.click()
                     page.wait_for_timeout(1000)
+                else:
+                    log("[TRADE ME] No 'Show all basic details' dialog — reading visible page.")
 
             except Exception as e:
                 log(f"[TRADE ME] Could not open full details: {e}")
@@ -150,71 +152,57 @@ def extract_trade_me_listing(url: str) -> Listing:
             previous_price = find_regex(r"Was\s*(\$\s*[\d,]+)")
 
            # -------------------------------------------------
-            # Odometer
+            # Odometer (km) + Engine (cc)
+            #
+            # Read from the CURRENT VISIBLE PAGE first (badges/body text),
+            # falling back to the details modal only if it exists. This never
+            # depends on clicking a "Show more details" element.
+            #
+            # Output preserves the source number formatting (commas kept) but
+            # drops the unit:
+            #   "262,000km" -> "262,000"        "39,000 km" -> "39,000"
+            #   "4477cc"    -> "4477"           "4,477cc"   -> "4,477"
+            # The km and cc patterns are unit-specific, so they can never swap.
             # -------------------------------------------------
+            log("[TRADE ME] Reading vehicle badges...")
 
-            kilometer = None
+            def find_first(patterns, *sources):
+                for src in sources:
+                    if not src:
+                        continue
+                    for pat in patterns:
+                        m = re.search(pat, src, re.IGNORECASE)
+                        if m:
+                            return m.group(1).strip()
+                return None
 
-            if vehicle_details_text:
-                lines = [
-                    line.strip()
-                    for line in vehicle_details_text.splitlines()
-                    if line.strip()
-                ]
+            kilometer = find_first(
+                [
+                    r"odometer\s*[:\r\n]*\s*(\d{1,3}(?:,\d{3})+|\d{4,})\s*km",
+                    r"(?<![\d/])(\d{1,3}(?:,\d{3})+|\d{4,})\s*km\b",
+                ],
+                body_text,
+                vehicle_details_text,
+            )
 
-                for i, line in enumerate(lines):
-                    if line.lower() == "odometer" and i + 1 < len(lines):
-                        value = lines[i + 1].strip()
+            if kilometer:
+                log(f"[TRADE ME] KM: {kilometer}")
+            else:
+                log("[WARN] Could not find kilometres")
 
-                        if re.fullmatch(r"[\d,]+\s*km", value, re.IGNORECASE):
-                            kilometer = value
-                            break
+            engine_cc = find_first(
+                [
+                    r"engine\s*(?:size)?\s*[:\r\n]*\s*(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc",
+                    r"(?<![\d/])(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc\b",
+                ],
+                body_text,
+                vehicle_details_text,
+            )
 
-            if not kilometer and vehicle_details_text:
-                match = re.search(
-                    r"odometer\s*[\r\n]+([\d,]+\s*km)",
-                    vehicle_details_text,
-                    re.IGNORECASE
-                )
-
-                if match:
-                    kilometer = match.group(1).strip()
-
-            log(f"[TRADE ME] Extracted kilometer: {kilometer}")
-
-
-            # -------------------------------------------------
-            # Engine
-            # -------------------------------------------------
-
-            engine_cc = None
-
-            if vehicle_details_text:
-                lines = [
-                    line.strip()
-                    for line in vehicle_details_text.splitlines()
-                    if line.strip()
-                ]
-
-                for i, line in enumerate(lines):
-                    if line.lower() == "engine size" and i + 1 < len(lines):
-                        value = lines[i + 1].strip()
-
-                        if re.fullmatch(r"[\d,]+\s*cc", value, re.IGNORECASE):
-                            engine_cc = value
-                            break
-
-            if not engine_cc and vehicle_details_text:
-                match = re.search(
-                    r"engine\s+size\s*[\r\n]+([\d,]+\s*cc)",
-                    vehicle_details_text,
-                    re.IGNORECASE
-                )
-
-                if match:
-                    engine_cc = match.group(1).strip()
-
-            log(f"[TRADE ME] Extracted engine_cc: {engine_cc}")
+            if engine_cc:
+                log(f"[TRADE ME] Engine: {engine_cc}")
+            else:
+                log("[WARN] Could not find engine capacity")
 
             # -------------------------------------------------
             # Basic vehicle details
@@ -231,6 +219,11 @@ def extract_trade_me_listing(url: str) -> Listing:
                 if re.search(rf"\b{re.escape(possible)}\b", body_text, re.IGNORECASE):
                     fuel = possible
                     break
+
+            if fuel:
+                log(f"[TRADE ME] Fuel: {fuel}")
+            else:
+                log("[WARN] Could not find fuel type")
 
             transmission = None
 
@@ -249,6 +242,7 @@ def extract_trade_me_listing(url: str) -> Listing:
                 "SUV",
                 "Sedan",
                 "Hatchback",
+                "Station Wagon",
                 "Wagon",
                 "Convertible",
                 "Coupe",
@@ -260,6 +254,16 @@ def extract_trade_me_listing(url: str) -> Listing:
                 if re.search(rf"\b{re.escape(possible)}\b", body_text, re.IGNORECASE):
                     body_type = possible
                     break
+
+            if body_type:
+                log(f"[TRADE ME] Body: {body_type}")
+            else:
+                log("[WARN] Could not find body type")
+
+            if transmission:
+                log(f"[TRADE ME] Transmission: {transmission}")
+            else:
+                log("[WARN] Could not find transmission")
 
             # -------------------------------------------------
             # Doors
@@ -389,15 +393,20 @@ def extract_trade_me_listing(url: str) -> Listing:
 
                 return None
 
-            energy_rating = extract_star_rating("Energy economy")
-            overall_safety = extract_star_rating("Overall safety")
-            carbon_rating = extract_star_rating("Carbon emissions")
-            driver_safety = extract_star_rating("Driver Safety")
+            log("[TRADE ME] Reading ratings...")
 
-            log(f"[TRADE ME] Energy economy rating: {energy_rating}")
-            log(f"[TRADE ME] Overall safety rating: {overall_safety}")
-            log(f"[TRADE ME] Carbon emissions rating: {carbon_rating}")
-            log(f"[TRADE ME] Driver safety rating: {driver_safety}")
+            def read_rating(label, log_name):
+                value = extract_star_rating(label)
+                if value is None:
+                    log(f"[WARN] Could not find {log_name} rating")
+                else:
+                    log(f"[RATING] {log_name}: {value}")
+                return value
+
+            energy_rating = read_rating("Energy economy", "Energy Economy")
+            overall_safety = read_rating("Overall safety", "Overall Safety")
+            carbon_rating = read_rating("Carbon emissions", "Carbon Emissions")
+            driver_safety = read_rating("Driver Safety", "Driver Safety")
 
             # -------------------------------------------------
             # Description

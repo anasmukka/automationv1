@@ -1,0 +1,38 @@
+{
+  "summary": "Re-test after the resilient Trade Me extraction fix. Rewrote /app/backend/tests/backend_test.py (28 pytest tests, all PASS) covering /api/health, /api/start validation (empty/whitespace/missing -> 400/400/422, 409 single-active guard), /api/status 404 + full completed snapshot, /api/close, plus a new TestExtractionRules class that statically validates the extraction rules without a browser: extract_star_rating regex maps '0 out of 6 stars'->'0', '3.5 out of 6 stars'->'3.5'; selector is div.tm-listing-rating-star__blue[aria-label]; 'Station Wagon' is present and ordered before generic 'Wagon'; the km/cc find_first patterns strip the unit while preserving commas ('262,000km'->'262,000', '4477cc'->'4477', '4,477cc'->'4,477') and can never swap (km pattern returns None on '4477cc' and cc pattern returns None on '262,000km'); body_text (visible page) is passed to find_first BEFORE vehicle_details_text, proving the modal is only a fallback. Live job on the sample Jaguar listing completed in ~14s: kilometer='39,000' (unit-less), engine_cc='2,996', ratings 1.5/5/1.5/5, 5 gallery photos on /photoserver/full/ (0 broken), description 2118 chars, Dice skipped gracefully, all new log lines present ([TRADE ME] Reading vehicle badges..., KM: 39,000, Engine: 2,996, Fuel: Petrol, Body: RV/SUV, Transmission: Automatic, Reading ratings..., [RATING] <Name>: <value>). Frontend E2E via Playwright: url-input/start-btn work, empty-URL validation banner shows, log-console streams, field-kilometer='39,000', field-engine_cc='2,996', all 4 rating testids populated, photo-grid renders 5 images, status-pill reaches 'Completed', stepper shows 'Dice Fill · Skipped', 0 error-class elements, no console errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/status/{job_id}", "issue": "PRE-EXISTING (also in iteration_1): listing.year='2021' while listing.title='2022 Jaguar F-PACE ...'. find_regex(r'Year\\s+((?:19|20)\\d{2})') matches a body-text year before the title fallback runs."},
+      {"endpoint": "/api/start", "issue": "In-memory _jobs dict has no eviction/TTL; logs+snapshots accumulate for the process lifetime."},
+      {"endpoint": "/api/close/{job_id}", "issue": "close only signals the Dice review wait; a job stuck in the Trade Me/photo phase cannot be aborted, so the single-active lock is held until Playwright timeouts elapse."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Extracted Vehicle Data", "issues": ["'Price' and 'Doors' rows always render '—' for this listing (Listing.price is hardcoded None in trade_me.py); the 'Price' vs 'Asking Price' pair is redundant.", "Odometer/Engine now show bare numbers ('39,000', '2,996') with no unit hint in the label — consider labelling them 'Odometer (km)' / 'Engine (cc)' since the value is intentionally unit-less for Dice."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Optional: confirm/fix the 'year' extraction precedence (title model year vs body-text year) — still 2021 vs title 2022.",
+    "Optional: label Odometer/Engine with their units in the UI now that values are unit-less.",
+    "Optional (robustness): fuel/transmission/body_type are keyword-scanned across the WHOLE body_text, so a description mentioning 'Diesel'/'Manual'/'SUV' can override the real badge value. Scope those scans to the badge/spec container or the vehicle-details block."
+  ],
+  "critical_code_review_comments": [
+    "trade_me.py: km fallback pattern (?<![\\d/])(\\d{4,})\\s*km\\b can match odometer-like numbers inside the free-text description (e.g. 'full service at 30000km'). Prefer the labelled/badge-scoped match and only fall back to a whole-page scan.",
+    "trade_me.py: body_type list is ordered RV/SUV, SUV, Sedan, Hatchback, Station Wagon, Wagon — 'Station Wagon' correctly precedes 'Wagon', but any earlier keyword appearing anywhere in body_text (incl. description) wins over the real badge.",
+    "server.py: _reader's finally block sets status=error if the child exits while status=='running'; a normal exit after an emitted done event is handled, but stderr is merged into logs unprefixed so tracebacks are indistinguishable from log lines. Consider tagging child stderr with [ERROR].",
+    "photos.py: temp photo dir is wiped per job and is not job-scoped — safe today only because of the app-level single-job guard."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "None. Live Trade Me listing 6051385299 used; photos downloaded to /app/temp_photos.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md does not exist. Not required — the app has no auth and Dice creds are intentionally unset (dice_configured=false verified via /api/health and the 'Dice creds not set' chip).",
+  "context_for_next_testing_agent": "Run `cd /app/backend && python -m pytest tests/backend_test.py -v -p no:randomly`. Full suite ~30s; each live job ~12-15s. Only one job may run at a time (2nd start -> 409); the module-scoped completed_job fixture retries once after 60s on 409, so keep job tests sequential. TestExtractionRules is browser-free and asserts the km/cc/rating regexes against synthetic no-modal badge text ('262,000km', 'Station Wagon', 'Petrol', '4477cc', 'Manual') — update it if the regexes in trade_me.py change. Verified values for listing 6051385299: kilometer='39,000', engine_cc='2,996', ask_price='$74,990', ratings 1.5/5/1.5/5, 5 photos, description 2118 chars, year='2021' (known nit). Dice login path is out of scope.",
+  "rca_of_the_issue": "No functional defects found; the reported bug is fixed. Unit stripping works because find_first uses unit-specific capture groups that exclude the trailing 'km'/'cc' from group(1) while keeping the source commas, and the modal-independence works because body_text (the visible page) is the first source passed to find_first with vehicle_details_text only as a fallback. Genuine 0-star ratings are handled since the aria-label regex ([0-9]+(?:\\.5)?) matches '0' and the code returns the string '0' rather than a falsy sentinel; null is only returned when no label/aria-label exists."
+}

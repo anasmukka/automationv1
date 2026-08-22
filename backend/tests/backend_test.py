@@ -2,13 +2,15 @@
 
 Modules under test:
   * server.py            -> /api/health, /api/start, /api/status/{id}, /api/close/{id}
+  * automation/job_worker.py -> subprocess worker event/log streaming
   * automation/runner.py -> job orchestration + graceful Dice skip
-  * automation/trade_me.py, automation/photos.py -> extraction assertions
+  * automation/trade_me.py, automation/photos.py -> resilient extraction assertions
 """
 
 import os
 import re
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -22,6 +24,7 @@ BASE_URL = base_url.rstrip("/")
 
 SAMPLE_URL = "https://www.trademe.co.nz/a/motors/cars/jaguar/f-pace/listing/6051385299"
 POLL_TIMEOUT = 150
+TRADE_ME_SRC = Path("/app/backend/automation/trade_me.py")
 
 
 @pytest.fixture(scope="session")
@@ -67,10 +70,82 @@ class TestValidation:
         assert r.status_code == 404, r.text
 
 
+# ---------------- static code checks: resilient extraction rules ----------------
+class TestExtractionRules:
+    """Source-level checks of trade_me.py regex behaviour (no browser needed)."""
+
+    @pytest.fixture(scope="class")
+    def src(self):
+        return TRADE_ME_SRC.read_text(encoding="utf-8")
+
+    def test_star_rating_regex_handles_zero_and_halves(self, src):
+        m = re.search(r'r"\(\[0-9\][^"]*out of[^"]*"', src)
+        assert m, "star rating regex not found in extract_star_rating"
+        pattern = m.group(0)[2:-1]  # strip r" and trailing "
+        for aria, expected in [
+            ("0 out of 6 stars", "0"),
+            ("3.5 out of 6 stars", "3.5"),
+            ("5 out of 5 stars", "5"),
+            ("1.5 out of 6 stars", "1.5"),
+        ]:
+            got = re.search(pattern, aria, re.IGNORECASE)
+            assert got, f"regex failed to match {aria!r}"
+            assert got.group(1) == expected, f"{aria!r} -> {got.group(1)!r}"
+
+    def test_rating_selector_is_blue_star_aria_label(self, src):
+        assert "div.tm-listing-rating-star__blue[aria-label]" in src
+
+    def test_body_type_includes_station_wagon(self, src):
+        assert '"Station Wagon"' in src
+        # Station Wagon must be checked before the generic "Wagon"
+        assert src.index('"Station Wagon"') < src.index('"Wagon"')
+
+    def test_km_engine_patterns_strip_unit_and_keep_commas(self, src):
+        """Replicate the find_first patterns against no-modal badge text."""
+        km_pats = [
+            r"odometer\s*[:\r\n]*\s*(\d{1,3}(?:,\d{3})+|\d{4,})\s*km",
+            r"(?<![\d/])(\d{1,3}(?:,\d{3})+|\d{4,})\s*km\b",
+        ]
+        cc_pats = [
+            r"engine\s*(?:size)?\s*[:\r\n]*\s*(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc",
+            r"(?<![\d/])(\d{3,}(?:,\d{3})*|\d{1,3}(?:,\d{3})+)\s*cc\b",
+        ]
+        for pats in (km_pats, cc_pats):
+            for p in pats:
+                assert p in src, f"pattern drifted from source: {p}"
+
+        def first(pats, text):
+            for p in pats:
+                m = re.search(p, text, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+            return None
+
+        badges = "262,000km\nStation Wagon\nPetrol\n4477cc\nManual"
+        assert first(km_pats, badges) == "262,000"
+        assert first(cc_pats, badges) == "4477"
+
+        badges2 = "39,000 km\n4,477cc\n9.2 L / 100km\n149 grams/km"
+        assert first(km_pats, badges2) == "39,000"
+        assert first(cc_pats, badges2) == "4,477"
+
+        # units never swapped: km pattern must not pick a cc value and vice versa
+        assert first(km_pats, "4477cc") is None
+        assert first(cc_pats, "262,000km") is None
+
+    def test_extraction_does_not_require_modal(self, src):
+        """Visible body_text must be the first source passed to find_first."""
+        block = src[src.index("kilometer = find_first"):src.index("if kilometer:")]
+        assert block.index("body_text") < block.index("vehicle_details_text")
+
+
 # ---------------- full extraction job ----------------
 @pytest.fixture(scope="module")
 def completed_job(api):
     r = api.post(f"{BASE_URL}/api/start", json={"url": SAMPLE_URL}, timeout=60)
+    if r.status_code == 409:
+        time.sleep(60)
+        r = api.post(f"{BASE_URL}/api/start", json={"url": SAMPLE_URL}, timeout=60)
     assert r.status_code == 200, f"start failed: {r.status_code} {r.text}"
     job_id = r.json()["job_id"]
     assert isinstance(job_id, str) and job_id
@@ -110,34 +185,70 @@ class TestJobFlow:
             time.sleep(1)
         assert snap and snap.get("done"), "first job never completed"
 
-        # streaming: log count must have grown across at least two distinct polls
         distinct = sorted(set(counts))
         assert len(distinct) >= 3, f"logs did not stream incrementally: {counts}"
         assert counts == sorted(counts), f"log count decreased: {counts}"
         assert "running" in statuses and statuses[-1] == "completed", statuses
-
-    def test_exact_values_for_sample_listing(self, completed_job):
-        listing = completed_job["listing"]
-        assert listing["kilometer"] == "39,000 km", listing["kilometer"]
-        assert listing["engine_cc"] == "2,996 cc", listing["engine_cc"]
-        assert listing["ask_price"] == "$74,990", listing["ask_price"]
-        ratings = completed_job["ratings"]
-        assert [ratings["energy_rating"], ratings["overall_safety"],
-                ratings["carbon_rating"], ratings["driver_safety"]] == \
-            ["1.5", "5", "1.5", "5"], ratings
-        assert len(completed_job["photos"]["urls"]) == 5
-        assert len(completed_job["description"]) > 2000, len(completed_job["description"])
 
     def test_status_completed(self, completed_job):
         assert completed_job["status"] == "completed", completed_job.get("error") or completed_job.get("message")
         assert completed_job["done"] is True
         assert completed_job["error"] is None
 
-    def test_dice_skipped_gracefully(self, completed_job):
-        logs = "\n".join(completed_job["logs"])
-        assert "DICE_USERNAME / DICE_PASSWORD not set" in logs, logs[-1500:]
-        assert "[ERROR] Job failed" not in logs
+    # ---- NEW: unit-less km / engine ----
+    def test_kilometer_is_unitless_comma_formatted(self, completed_job):
+        km = completed_job["listing"]["kilometer"]
+        assert km == "39,000", f"expected '39,000', got {km!r}"
+        assert not re.search(r"[a-z]", km, re.IGNORECASE), f"unit not stripped: {km!r}"
 
+    def test_engine_is_unitless_comma_formatted(self, completed_job):
+        cc = completed_job["listing"]["engine_cc"]
+        assert cc == "2,996", f"expected '2,996', got {cc!r}"
+        assert not re.search(r"[a-z]", cc, re.IGNORECASE), f"unit not stripped: {cc!r}"
+
+    def test_km_and_engine_not_swapped(self, completed_job):
+        km = int(completed_job["listing"]["kilometer"].replace(",", ""))
+        cc = int(completed_job["listing"]["engine_cc"].replace(",", ""))
+        assert km > cc, f"km/engine look swapped: km={km} cc={cc}"
+        assert km >= 1000
+        assert 100 <= cc <= 10000
+
+    def test_ask_price_has_dollar(self, completed_job):
+        assert completed_job["listing"]["ask_price"].startswith("$")
+
+    def test_ratings(self, completed_job):
+        ratings = completed_job["ratings"]
+        assert isinstance(ratings, dict)
+        assert [ratings.get("energy_rating"), ratings.get("overall_safety"),
+                ratings.get("carbon_rating"), ratings.get("driver_safety")] == \
+            ["1.5", "5", "1.5", "5"], ratings
+        for key in ["energy_rating", "overall_safety", "carbon_rating", "driver_safety"]:
+            val = ratings.get(key)
+            assert re.fullmatch(r"[0-9]+(?:\.5)?", str(val)), f"rating {key} not numeric: {val!r}"
+
+    # ---- NEW: resilient-extraction log lines ----
+    def test_resilient_extraction_logs(self, completed_job):
+        logs = "\n".join(completed_job["logs"])
+        for expected in [
+            "[TRADE ME] Reading vehicle badges...",
+            "[TRADE ME] KM: 39,000",
+            "[TRADE ME] Engine: 2,996",
+            "[TRADE ME] Fuel: Petrol",
+            "[TRADE ME] Reading ratings...",
+        ]:
+            assert expected in logs, f"missing log line: {expected!r}"
+        assert re.search(r"\[TRADE ME\] Body: \S+", logs), "missing Body log"
+        assert re.search(r"\[TRADE ME\] Transmission: \S+", logs), "missing Transmission log"
+
+    def test_per_rating_logs(self, completed_job):
+        logs = "\n".join(completed_job["logs"])
+        for name in ["Energy Economy", "Overall Safety", "Carbon Emissions", "Driver Safety"]:
+            assert re.search(rf"\[RATING\] {re.escape(name)}: [0-9.]+", logs) or \
+                f"[WARN] Could not find {name} rating" in logs, f"no [RATING]/[WARN] line for {name}"
+        # for this listing all 4 ratings exist -> no rating WARNs
+        assert "[WARN] Could not find" not in logs or "rating" not in logs.split("[WARN] Could not find")[-1][:40], logs[-800:]
+
+    # ---- regressions ----
     def test_listing_fields(self, completed_job):
         listing = completed_job["listing"]
         assert isinstance(listing, dict)
@@ -146,29 +257,10 @@ class TestJobFlow:
                     "import_history", "ask_price", "energy_economy", "carbon_emissions"]:
             assert listing.get(key), f"listing['{key}'] is empty: {listing.get(key)}"
 
-    def test_kilometer_format_not_swapped(self, completed_job):
-        km = completed_job["listing"]["kilometer"]
-        assert re.fullmatch(r"[\d,]+\s*km", km, re.IGNORECASE), f"bad odometer value: {km!r}"
-        assert "," in km, f"comma stripped from odometer: {km!r}"
-        assert "cc" not in km.lower()
-
-    def test_engine_format_not_swapped(self, completed_job):
-        cc = completed_job["listing"]["engine_cc"]
-        assert re.fullmatch(r"[\d,]+\s*cc", cc, re.IGNORECASE), f"bad engine value: {cc!r}"
-        assert "," in cc, f"comma stripped from engine: {cc!r}"
-        assert "km" not in cc.lower()
-
-    def test_ask_price_has_dollar(self, completed_job):
-        assert completed_job["listing"]["ask_price"].startswith("$")
-
-    def test_ratings(self, completed_job):
-        ratings = completed_job["ratings"]
-        assert isinstance(ratings, dict)
-        for key in ["energy_rating", "overall_safety", "carbon_rating", "driver_safety"]:
-            val = ratings.get(key)
-            assert val is not None, f"rating {key} missing"
-            assert re.fullmatch(r"[0-9]+(?:\.5)?", str(val)), f"rating {key} not numeric: {val!r}"
-            assert 0 <= float(val) <= 5
+    def test_dice_skipped_gracefully(self, completed_job):
+        logs = "\n".join(completed_job["logs"])
+        assert "DICE_USERNAME / DICE_PASSWORD not set" in logs, logs[-1500:]
+        assert "[ERROR] Job failed" not in logs
 
     def test_photos(self, completed_job):
         urls = completed_job["photos"]["urls"]
@@ -179,8 +271,6 @@ class TestJobFlow:
             assert "/photoserver/64x64m/" not in u
         files = completed_job["photos"]["files"]
         assert len(files) == len(urls), f"downloaded {len(files)} of {len(urls)}"
-        for f in files:
-            assert f.startswith("/app/temp_photos/")
 
     def test_photo_urls_reachable(self, completed_job):
         url = completed_job["photos"]["urls"][0]

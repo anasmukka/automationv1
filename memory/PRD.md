@@ -43,11 +43,15 @@ tested selectors/logic and WITHOUT ever auto-submitting the Dice ad.
   (20 backend tests + full UI run).
 
 ## Known / deferred
+- KM/engine now stored WITHOUT the unit but WITH source commas (e.g. `39,000`,
+  `2,996`) — per the user's explicit 2026-06 instruction ("262,000km" -> "262,000").
+  Extraction is now resilient: reads the visible page (badges/body text) first,
+  the vehicle-info modal only as a fallback; never depends on a "Show more" click.
 - `year` may derive from a body-text "Year" label rather than the title year
   (e.g. 2021 vs title 2022). PRESERVED original logic — awaiting user confirmation.
-- KM/engine filled into Dice WITH unit (e.g. `55,830 km`) per existing tested
-  code; spec example shows no unit — awaiting user confirmation before changing.
 - Dice login/fill path not executable here (no creds) — user validates locally.
+- Windows/Python 3.14: fixed the `NotImplementedError` (Playwright sync in a
+  thread) by running each job in a CHILD PROCESS (backend/automation/job_worker.py).
 
 ## Backlog (P1/P2)
 - P2: In-memory job store eviction/TTL.
