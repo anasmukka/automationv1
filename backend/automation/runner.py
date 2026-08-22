@@ -7,6 +7,7 @@ until a close signal (or timeout).
 """
 
 import threading
+import traceback
 from dataclasses import asdict
 from typing import Callable, Optional
 
@@ -139,6 +140,20 @@ def run_job(url: str, emit: Emit, close_event: Optional[threading.Event] = None)
         emit({"type": "done"})
 
     except Exception as e:
-        log(f"[ERROR] Job failed: {e}")
-        emit({"type": "status", "status": "error", "message": str(e)})
+        detail = str(e).strip() or repr(e)
+        message = f"{type(e).__name__}: {detail}"
+        log(f"[ERROR] Job failed: {message}")
+        for line in traceback.format_exc().rstrip().splitlines():
+            log(line)
+
+        # Common local pitfalls -> actionable hint.
+        low = message.lower()
+        if "executable doesn't exist" in low or "playwright install" in low:
+            log("[HINT] Run:  python -m playwright install chromium")
+        elif "missing dependencies" in low or "libnss3" in low or "host system is missing" in low:
+            log("[HINT] Run:  python -m playwright install-deps chromium")
+        elif "timeout" in low:
+            log("[HINT] Trade Me took too long to load — check your internet/VPN and try again.")
+
+        emit({"type": "status", "status": "error", "message": message})
         emit({"type": "done"})
