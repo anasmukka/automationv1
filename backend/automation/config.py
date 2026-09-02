@@ -81,6 +81,4 @@ DICE_RATING_FIELDS = {
 PRICE_FIELDS = {
     "price",
     "ask_price",
-    "buy_price",
-    "starting_price",
 }

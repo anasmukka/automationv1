@@ -154,118 +154,194 @@ def fill_dice_form(page: Page, listing: Listing):
 # Dice star ratings
 # ---------------------------------------------------------
 def fill_dice_ratings(page: Page, listing: Listing):
+    """Fill Dice ratings using their confirmed numeric option values."""
+
     log("[DICE] Filling vehicle ratings...")
 
     ratings = {
-        "energy_rating": listing.energy_rating,
-        "overall_safety": listing.overall_safety,
-        "carbon_rating": listing.carbon_rating,
-        "driver_safety": listing.driver_safety,
+        "energy_rating": listing.energy_rating,      # exf_41
+        "overall_safety": listing.overall_safety,    # exf_42
+        "carbon_rating": listing.carbon_rating,      # exf_43
+        "driver_safety": listing.driver_safety,      # exf_44
     }
 
     for field_name, value in ratings.items():
         selector = DICE_RATING_FIELDS[field_name]
-
-        if value is None:
-            # Rating dropdowns do not have a "." option.
-            # Leave them at Dice's default "- None -" when Trade Me has no rating.
-            log(f"[SKIP] {field_name}: no source rating")
-            continue
-
         locator = page.locator(selector).first
 
-        # Make sure the dropdown has actually rendered before selecting.
         try:
             locator.wait_for(state="attached", timeout=5000)
         except Exception:
             log(f"[WARNING] Rating selector not found: {selector}")
             continue
 
-        value = str(value).strip()
+        if value is None or str(value).strip() == "":
+            option_value = "-1"
 
-        # Build a set of equivalent strings Dice might use for this rating,
-        # e.g. "5" could be listed as "5", "5.0"; "3.5" stays "3.5".
-        candidates = [value]
-        try:
-            f = float(value)
-            if f.is_integer():
-                candidates.append(str(int(f)))   # "5"
-                candidates.append(f"{int(f)}.0")  # "5.0"
-            candidates.append(str(f))             # "3.5" / "5.0"
-        except ValueError:
-            pass
-
-        selected = False
-        for cand in dict.fromkeys(candidates):  # de-dupe, keep order
-            # Try matching by option value, then by visible label.
-            for kwargs in ({"value": cand}, {"label": cand}):
-                try:
-                    locator.select_option(**kwargs)
-                    selected = True
-                    break
-                except Exception:
-                    continue
-            if selected:
-                break
-
-        if selected:
-            # Nudge any custom widget bound to the native <select> to refresh.
             try:
+                locator.select_option(option_value)
                 locator.dispatch_event("change")
-            except Exception:
-                pass
-            log(f"[FILL] {field_name}: {value} stars ({selector})")
-        else:
-            # Final fallback: pick the option whose visible text starts with the
-            # numeric value (handles labels like "3.5" or "3.5 stars").
-            try:
-                option_texts = locator.locator("option").all_inner_texts()
-            except Exception:
-                option_texts = []
-
-            for idx, txt in enumerate(option_texts):
-                t = (txt or "").strip()
-                if t == value or re.match(rf"^{re.escape(value)}(\D|$)", t):
-                    try:
-                        locator.select_option(index=idx)
-                        selected = True
-                        break
-                    except Exception:
-                        continue
-
-            if selected:
-                try:
-                    locator.dispatch_event("change")
-                except Exception:
-                    pass
-                log(f"[FILL] {field_name}: {value} stars ({selector})")
-            else:
+                log(f"[FILL] {field_name}: None → -1 ({selector})")
+            except Exception as e:
                 log(
-                    f"[ERROR] Could not select {field_name}={value} on {selector}. "
-                    f"Available options: {option_texts}"
+                    f"[ERROR] Could not select "
+                    f"{field_name}=-1: {e}"
                 )
 
+            continue
+
+        try:
+            rating = float(str(value).strip())
+        except ValueError:
+            log(f"[ERROR] Invalid rating for {field_name}: {value}")
+            continue
+
+        if rating < 0 or rating > 6 or (rating * 2) % 1 != 0:
+            log(f"[ERROR] Invalid 0.5-step rating for {field_name}: {value}")
+            continue
+
+        # Dice rating option values use half-star steps:
+        # 0 stars = 0
+        # 0.5 stars = 1
+        # 1 star = 2
+        # 1.5 stars = 3
+        # ...
+        # 6 stars = 12
+        option_value = str(int(rating * 2) + 1)
+        try:
+            locator.select_option(option_value)
+            locator.dispatch_event("change")
+            log(
+                f"[FILL] {field_name}: "
+                f"{option_value} stars ({selector})"
+            )
+        except Exception as e:
+            log(
+                f"[ERROR] Could not select "
+                f"{field_name}={option_value}: {e}"
+            )
 
 # ---------------------------------------------------------
 # Dice tag, location and terms
 # ---------------------------------------------------------
-def set_dice_listing_options(page: Page):
+# ---------------------------------------------------------
+# Dice tag, location and terms
+# ---------------------------------------------------------
+def set_dice_listing_options(page: Page, listing: Listing):
     log("[DICE] Setting tag, location and terms...")
 
+    # Tag
     tag = page.locator("#tagid")
+
     if tag.count() > 0:
         tag.select_option("1")
         log("[FILL] tag: 1")
     else:
         log("[WARNING] Tag selector #tagid not found.")
 
+    # Location
     location = page.locator("#location")
+
     if location.count() > 0:
-        location.select_option("34")
-        log("[FILL] location: 34")
+        trade_me_location = (
+            listing.location or listing.address or ""
+        ).strip()
+
+        if trade_me_location:
+            options = location.locator("option")
+            matched_value = None
+
+            target = trade_me_location.lower()
+
+            # Also allow "Wiri, Auckland" -> "Auckland"
+            parts = [
+                part.strip()
+                for part in trade_me_location.split(",")
+                if part.strip()
+            ]
+            city = parts[-1].lower() if parts else target
+
+            for i in range(options.count()):
+                option = options.nth(i)
+
+                try:
+                    text = option.inner_text().strip()
+                    value = option.get_attribute("value")
+
+                    if not value:
+                        continue
+
+                    text_lower = text.lower()
+
+                    # Exact match
+                    if text_lower == target:
+                        matched_value = value
+                        break
+
+                    # City match
+                    if text_lower == city:
+                        matched_value = value
+                        break
+
+                except Exception:
+                    continue
+
+            if matched_value is not None:
+                location.scroll_into_view_if_needed()
+                location.click()
+                location.select_option(matched_value)
+                location.dispatch_event("change")
+
+                log(
+                    f"[FILL] location: "
+                    f"{trade_me_location} -> {matched_value}"
+                )
+            else:
+                log(
+                    f"[WARNING] No Dice location matched "
+                    f"Trade Me location: {trade_me_location}"
+                )
+        else:
+            log("[SKIP] Dice location: no Trade Me location")
     else:
         log("[WARNING] Location selector #location not found.")
 
+        # Address
+    address_value = (
+        listing.address or listing.location or ""
+    ).strip()
+
+    if not address_value:
+        address_value = "."
+
+    address_field = None
+
+    address_selectors = [
+        'input[name="address"]',
+        'input[id="address"]',
+        'textarea[name="address"]',
+        'textarea[id="address"]',
+        'input[placeholder*="address" i]',
+        'textarea[placeholder*="address" i]',
+    ]
+
+    for selector in address_selectors:
+        candidate = page.locator(selector)
+
+        if candidate.count() > 0:
+            address_field = candidate.first
+            break
+
+    if address_field is not None:
+        try:
+            address_field.fill(address_value)
+            log(f"[FILL] address: {address_value}")
+        except Exception as e:
+            log(f"[ERROR] Could not fill address: {e}")
+    else:
+        log("[WARNING] Dice Address field not found.")
+
+    # Terms
     terms = page.get_by_role(
         "checkbox",
         name="By submitting this form you"
@@ -274,35 +350,10 @@ def set_dice_listing_options(page: Page):
     if terms.count() > 0:
         if not terms.first.is_checked():
             terms.first.check()
+
         log("[FILL] terms: checked")
     else:
         log("[WARNING] Terms checkbox not found.")
-
-
-# ---------------------------------------------------------
-# Description
-# ---------------------------------------------------------
-def fill_description(page: Page, description: str):
-
-    if not description:
-        description = "."
-        log("[FILL] Description: . (no source data)")
-
-    log("[DICE] Copying Trade Me description directly.")
-
-    try:
-        # Dice uses a TinyMCE rich-text editor inside an iframe.
-        editor_frame = page.frame_locator("iframe").locator("body")
-
-        editor_frame.click()
-        editor_frame.fill(description)
-
-        log("[FILL] Description")
-
-    except Exception as e:
-        log(f"[ERROR] Could not fill Description: {e}")
-
-
 # ---------------------------------------------------------
 # Dice photo upload
 # ---------------------------------------------------------
@@ -324,3 +375,23 @@ def upload_dice_photos(page: Page, photo_files):
         log(f"[FILL] Photos: {len(photo_files)} uploaded")
     except Exception as e:
         log(f"[ERROR] Could not upload photos: {e}")
+# ---------------------------------------------------------
+# Description
+# ---------------------------------------------------------
+def fill_description(page: Page, description: str):
+    if not description:
+        description = "."
+        log("[FILL] Description: . (no source data)")
+
+    log("[DICE] Copying Trade Me description directly.")
+
+    try:
+        editor_frame = page.frame_locator("iframe").locator("body")
+
+        editor_frame.click()
+        editor_frame.fill(description)
+
+        log("[FILL] Description")
+
+    except Exception as e:
+        log(f"[ERROR] Could not fill Description: {e}")

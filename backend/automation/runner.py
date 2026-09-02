@@ -115,7 +115,7 @@ def run_job(url: str, emit: Emit, close_event: Optional[threading.Event] = None)
                 fill_dice_ratings(page, listing)
                 fill_description(page, listing.description)
                 upload_dice_photos(page, photo_files)
-                set_dice_listing_options(page)
+                set_dice_listing_options(page, listing)
 
                 log("")
                 log("======================================")

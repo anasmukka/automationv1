@@ -456,6 +456,31 @@ def extract_trade_me_listing(url: str) -> Listing:
             log("EXTRACTED TRADE ME DATA")
             log("=" * 60)
 
+
+
+            # Seller location
+            seller_location = None
+
+            try:
+                body_text = page.locator("body").inner_text()
+
+                location_match = re.search(
+                    r"Seller\s+located\s+in\s+(.+?)(?=\s*·\s*\d+\s+views|\s*•\s*\d+\s+views|\n|$)",
+                    body_text,
+                    re.IGNORECASE,
+                )
+
+                if location_match:
+                    seller_location = re.sub(
+                        r"\s+",
+                        " ",
+                        location_match.group(1),
+                    ).strip(" .•·")
+
+                log(f"seller_location     : {seller_location}")
+
+            except Exception as e:
+                log(f"[WARNING] Could not extract seller location: {e}")
             extracted = {
                 "title": title,
                 "kilometer": kilometer,
@@ -479,7 +504,9 @@ def extract_trade_me_listing(url: str) -> Listing:
                 "overall_safety": overall_safety,
                 "carbon_rating": carbon_rating,
                 "driver_safety": driver_safety,
+                "seller_location": seller_location,
             }
+
 
             for key, value in extracted.items():
                 log(f"{key:20} : {value}")
@@ -517,6 +544,8 @@ def extract_trade_me_listing(url: str) -> Listing:
                 listed_on=None,
                 price=None,
                 description=description,
+                location=seller_location,
+                address=seller_location,
             )
 
         finally:
