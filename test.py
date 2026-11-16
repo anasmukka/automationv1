@@ -19,7 +19,7 @@ def run(playwright: Playwright) -> None:
     browser = playwright.chromium.launch(headless=False)
     context = browser.new_context()
     page = context.new_page()
-    page.goto("https://may2026karnataka.dicewebfreelancers.com/index.php")
+    page.goto("https://indonesiadata.dicewebfreelancers.com/")
     page.get_by_role("textbox", name="Username").click()
     page.get_by_role("textbox", name="Username").fill(DICE_USERNAME)
     page.get_by_role("textbox", name="Password").click()

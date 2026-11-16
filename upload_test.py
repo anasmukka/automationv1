@@ -56,7 +56,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch(headless=False)
     page = browser.new_page()
 
-    page.goto("https://may2026karnataka.dicewebfreelancers.com/index.php")
+    page.goto("https://indonesiadata.dicewebfreelancers.com/")
 
     page.get_by_role("textbox", name="Username").fill(DICE_USERNAME)
     page.get_by_role("textbox", name="Password").fill(DICE_PASSWORD)
