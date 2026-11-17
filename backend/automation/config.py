@@ -17,7 +17,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # ---------------------------------------------------------
 DICE_URL = os.getenv(
     "DICE_URL",
-    "https://indonesiadata.dicewebfreelancers.com/",
+    "https://indonesiadata.dicewebfreelancers.com",
 )
 
 DICE_USERNAME = os.getenv("DICE_USERNAME")
